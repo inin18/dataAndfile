@@ -1,0 +1,2 @@
+,win_rate,standard_error,mode,avg_length,n_wins,n_wins_base,n_draws,n_total,discrete_win_rate,length_controlled_winrate,lc_standard_error
+llama2-7b,2.0724495453488974,1.2226015056094048,community,12885,2,98,0,100,2.0,0.43979741477060297,0.05898564393470864
