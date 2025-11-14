@@ -3,7 +3,6 @@ from typing import Tuple
 import torch
 import torch.distributed as dist
 
-
 def _check_initialized() -> Tuple[int, int]:
     if not dist.is_initialized():
         raise RuntimeError(
@@ -40,6 +39,15 @@ def my_broadcast(tensor: torch.Tensor, src: int = 0) -> torch.Tensor:
     rank, world_size = _check_initialized()
     
     # TODO: Implement broadcast using only dist.send and dist.recv
+    if rank == src:
+        for each in range(world_size):
+            if each != rank:
+                dist.send(tensor=tensor, dst=each) 
+    else:
+        dist.recv(tensor=tensor, src=src)
+
+    return tensor
+
     raise NotImplementedError("TODO: Implement my_broadcast")
 
 
@@ -69,6 +77,25 @@ def my_allreduce(tensor: torch.Tensor) -> torch.Tensor:
     
     # TODO: Implement allreduce using only dist.send and dist.recv
     # Hint: A simple algorithm is to gather to a root rank, sum, then broadcast
+    root = 0
+    if rank == root:
+        tensor_tmp = torch.empty_like(tensor) 
+        for each in range(world_size):
+            if each != root:
+                dist.recv(tensor=tensor_tmp, src=each)
+                tensor.add_(tensor_tmp)
+    else:
+        dist.send(tensor=tensor, dst=root)
+
+    if rank == root:
+        for each in range(world_size):
+            if each!=root:
+                dist.send(tensor=tensor, dst=each)
+    else:
+        dist.recv(tensor=tensor, src=root)
+
+    return tensor
+
     raise NotImplementedError("TODO: Implement my_allreduce")
 
 
@@ -98,6 +125,28 @@ def my_allgather(tensor: torch.Tensor) -> torch.Tensor:
     rank, world_size = _check_initialized()
     
     # TODO: Implement allgather using only dist.send and dist.recv
+    root = 0
+    chunk = tensor.size(0)
+    gathered_size = chunk*world_size
+    gathered_tensor = torch.empty([gathered_size]+list(tensor.size())[1:], dtype=tensor.dtype, device=tensor.device)
+    if rank != root:
+        dist.send(tensor=tensor, dst=root)
+    else:
+        gathered_tensor[chunk*root:chunk*(root+1)].copy_(tensor)
+        tensor_tmp = torch.empty_like(tensor)
+        for each in range(world_size):
+            if each!=root:
+                dist.recv(tensor=tensor_tmp, src=each)
+                gathered_tensor[chunk*each:chunk*(each+1)].copy_(tensor_tmp)
+
+    if rank==root:
+        for each in range(world_size):
+            if each!=root:
+                dist.send(tensor=gathered_tensor, dst=each)
+    else:
+        dist.recv(tensor=gathered_tensor, src=root)
+
+    return gathered_tensor
     raise NotImplementedError("TODO: Implement my_allgather")
 
 
@@ -129,6 +178,34 @@ def my_reduce_scatter(tensor: torch.Tensor) -> torch.Tensor:
     rank, world_size = _check_initialized()
     
     # TODO: Implement reduce_scatter using only dist.send and dist.recv
+    root = 0
+    tensor_tmp = torch.zeros(tensor.size())
+    tensor_buffer = torch.empty_like(tensor)
+
+    if rank == root:
+        tensor_tmp.add_(tensor)
+        for each in range(world_size):
+            if each != root:
+                dist.recv(tensor=tensor_buffer, src=each)
+                tensor_tmp.add_(tensor_buffer)
+    else:
+        dist.send(tensor=tensor, dst=root)
+
+    chunk_size = tensor_tmp.size()[0]//world_size
+    chunk_tensor = torch.zeros([chunk_size]+list(tensor.size())[1:], dtype=tensor.dtype,device=tensor.device)
+    out_tensor = torch.empty_like(chunk_tensor)
+    if rank==root:
+        for each in range(world_size):
+            chunk_tensor=tensor_tmp[each*chunk_size:(each+1)*chunk_size]
+            if each != root:
+                dist.send(tensor=chunk_tensor, dst=each)
+            else:
+                out_tensor = chunk_tensor
+    else:
+        dist.recv(tensor=out_tensor, src=root)
+
+    return out_tensor
+
     raise NotImplementedError("TODO: Implement my_reduce_scatter")
 
 
@@ -170,5 +247,32 @@ def my_all_to_all(tensor: torch.Tensor, scatter_dim: int, gather_dim: int) -> to
     
     # TODO: Implement all_to_all using only dist.send and dist.recv
     # Hint: Use isend/irecv to avoid deadlocks
+    tensor_size = list(tensor.size())
+    chunk_size =tensor_size[scatter_dim]//world_size
+    chunks = tensor.split(chunk_size, dim=scatter_dim)
+
+    tensor_buffers = [torch.empty_like(chunks[0]) for _ in range(world_size)]
+    recv_req = []
+    for each in range(world_size):
+        if each != rank:
+            tag = rank + world_size*each # tag//world_size, tag%world_size
+            recv_req.append(dist.irecv(tensor=tensor_buffers[each], src=each,tag=tag))
+        else:
+            tensor_buffers[rank] = chunks[rank]
+    
+    send_req = []
+    for each in range(world_size):
+        if each != rank:
+            send_req.append(dist.isend(tensor=chunks[each], dst=each, tag=each+world_size*rank))
+
+    for req in recv_req:
+        req.wait()
+    for req in send_req:
+        req.wait()
+    tensor_gathered = torch.cat(tensor_buffers, dim=gather_dim)
+
+    return tensor_gathered
+
+
     raise NotImplementedError("TODO: Implement my_all_to_all")
 
