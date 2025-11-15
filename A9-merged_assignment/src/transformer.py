@@ -113,7 +113,19 @@ class BasicTransformerBlock(nn.Module):
         * Each rank should extract its portion based on rank and world_size.
         """
         # TODO: Implement this method
-        raise NotImplementedError("TODO: Implement init_tensor_parallel_shards")
+        rank = dist.get_rank()
+        world_size = dist.get_world_size()
+
+        self.q_proj_shard = torch.chunk(self.q_proj, world_size, dim=0)[rank]
+        self.k_proj_shard = torch.chunk(self.k_proj, world_size, dim=0)[rank]
+        self.v_proj_shard = torch.chunk(self.v_proj, world_size, dim=0)[rank]
+        self.o_proj_shard = torch.chunk(self.o_proj, world_size, dim=1)[rank]
+        self.fc1_shard = torch.chunk(self.fc1, world_size, dim=0)[rank]
+        if self.fc1.bias != None:
+            self.fc1_bias_shard = torch.chunk(self.fc1.bias, world_size, dim=0)[rank]
+        self.fc2_shard = torch.chunk(self.fc2, world_size, dim=1)[rank]
+        
+        #raise NotImplementedError("TODO: Implement init_tensor_parallel_shards")
 
     def forward_tensor_parallel(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -139,6 +151,53 @@ class BasicTransformerBlock(nn.Module):
             Output tensor of shape [batch, seq_len, d_model].
         """
         # TODO: Implement this method
+        world_size = dist.get_world_size()
+        rank = dist.get_rank()
+
+        bsz, seq_len, d_model = x.shape
+        h = self.ln1(x)
+
+        # Self-attention
+        q_shard = self._shape(self.q_proj_shard(h), bsz, seq_len)
+        k_shard = self._shape(self.k_proj_shard(h), bsz, seq_len)
+        v_shard = self._shape(self.v_proj_shard(h), bsz, seq_len)
+
+        q = [torch.empty_like(q_shard) for _ in range(world_size)]
+        k = [torch.empty_like(k_shard) for _ in range(world_size)]
+        v = [torch.empty_like(v_shard) for _ in range(world_size)]
+        dist.all_gather(q, q_shard)
+        dist.all_gather(k, k_shard)
+        dist.all_gather(v, v_shard)
+
+        q = torch.cat(q, dim=1)
+        k = torch.cat(k, dim=1)
+        v = torch.cat(v, dim=1)
+
+        # scaled dot-product attention
+        attn_scores = torch.matmul(q, k.transpose(-2, -1)) / (self.head_dim ** 0.5)
+        attn_weights = F.softmax(attn_scores, dim=-1)
+        attn_output = torch.matmul(attn_weights, v)  # [B, n_heads, S, head_dim]
+
+        # merge heads
+        attn_output = attn_output.transpose(1, 2).contiguous()  # [B, S, n_heads, head_dim]
+        attn_output = attn_output.view(bsz, seq_len, d_model)
+        attn_output = self.o_proj_shard(attn_output)
+        
+        dist.all_reduce(attn_output)
+
+        x = x + self.dropout(attn_output)
+
+        # Feed-forward
+        h2 = self.ln2(x)
+        fc1_output_shard = self.fc1_shard(h2)
+        fc1_output = [torch.empty_like(fc1_output_shard) for _ in range(world_size)]
+        dist.all_gather(fc1_output, fc1_output_shard)
+        fc1_output = torch.cat(fc1_output,dim=1)
+        ff = self.fc2_shard(F.relu(fc1_output))
+        dist.all_reduce(ff)
+        x = x + self.dropout(ff)
+
+        return x
         raise NotImplementedError("TODO: Implement forward_tensor_parallel")
 
     def forward_ulysses(self, x: torch.Tensor) -> torch.Tensor:
