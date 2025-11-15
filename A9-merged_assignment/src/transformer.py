@@ -176,6 +176,7 @@ class BasicTransformerBlock(nn.Module):
         v = torch.cat(v, dim=-1)
         v = self._shape(v, bsz, seq_len)
 
+
         # scaled dot-product attention
         attn_scores = torch.matmul(q, k.transpose(-2, -1)) / (self.head_dim ** 0.5)
         attn_weights = F.softmax(attn_scores, dim=-1)
@@ -184,7 +185,8 @@ class BasicTransformerBlock(nn.Module):
         # merge heads
         attn_output = attn_output.transpose(1, 2).contiguous()  # [B, S, n_heads, head_dim]
         attn_output = attn_output.view(bsz, seq_len, d_model)
-        attn_output_shard = F.linear(attn_output, self.o_proj_shard)
+        attn_output_shard = torch.chunk(attn_output, world_size, dim=-1)[rank]
+        attn_output_shard = F.linear(attn_output_shard, self.o_proj_shard)
         
         dist.all_reduce(attn_output_shard)
 #        attn_output_gathered = torch.empty_like(x)
@@ -195,16 +197,20 @@ class BasicTransformerBlock(nn.Module):
 
         # Feed-forward
         h2 = self.ln2(x)
+
         fc1_output_shard = F.linear(h2, self.fc1_shard, bias = self.fc1_bias_shard if self.fc1_bias_shard is not None else False)
         fc1_output = [torch.empty_like(fc1_output_shard, dtype=fc1_output_shard.dtype) for _ in range(world_size)]
         dist.all_gather(fc1_output, fc1_output_shard)
         fc1_output = torch.cat(fc1_output,dim=-1)
 
+        fc1_output = F.relu(fc1_output)
         fc1_fc2_shard = torch.chunk(fc1_output, world_size, dim=-1)[rank]
 
-        ff = F.linear(F.relu(fc1_fc2_shard), self.fc2_shard)
+        ff = F.linear(fc1_fc2_shard, self.fc2_shard)
 #        ff = torch.matmul(F.relu(fc1_fc2_shard), self.fc2_shard.transpose(0,1))
         dist.all_reduce(ff)
+        if self.fc2.bias is not None:
+            ff = ff + self.fc2.bias.data
         x = x + self.dropout(ff)
 
         return x
