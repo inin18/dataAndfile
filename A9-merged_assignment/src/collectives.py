@@ -263,7 +263,7 @@ def my_all_to_all(tensor: torch.Tensor, scatter_dim: int, gather_dim: int) -> to
     send_req = []
     for each in range(world_size):
         if each != rank:
-            send_req.append(dist.isend(tensor=chunks[each], dst=each, tag=each+world_size*rank))
+            send_req.append(dist.isend(tensor=chunks[each].contiguous(), dst=each, tag=each+world_size*rank))
 
     for req in recv_req:
         req.wait()
