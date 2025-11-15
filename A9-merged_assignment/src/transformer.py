@@ -116,14 +116,14 @@ class BasicTransformerBlock(nn.Module):
         rank = dist.get_rank()
         world_size = dist.get_world_size()
 
-        self.q_proj_shard = torch.chunk(self.q_proj, world_size, dim=0)[rank]
-        self.k_proj_shard = torch.chunk(self.k_proj, world_size, dim=0)[rank]
-        self.v_proj_shard = torch.chunk(self.v_proj, world_size, dim=0)[rank]
-        self.o_proj_shard = torch.chunk(self.o_proj, world_size, dim=1)[rank]
-        self.fc1_shard = torch.chunk(self.fc1, world_size, dim=0)[rank]
+        self.q_proj_shard = torch.chunk(self.q_proj.weight.data, world_size, dim=0)[rank]
+        self.k_proj_shard = torch.chunk(self.k_proj.weight.data, world_size, dim=0)[rank]
+        self.v_proj_shard = torch.chunk(self.v_proj.weight.data, world_size, dim=0)[rank]
+        self.o_proj_shard = torch.chunk(self.o_proj.weight.data, world_size, dim=1)[rank]
+        self.fc1_shard = torch.chunk(self.fc1.weight.data, world_size, dim=0)[rank]
         if self.fc1.bias != None:
-            self.fc1_bias_shard = torch.chunk(self.fc1.bias, world_size, dim=0)[rank]
-        self.fc2_shard = torch.chunk(self.fc2, world_size, dim=1)[rank]
+            self.fc1_bias_shard = torch.chunk(self.fc1.bias.data, world_size, dim=0)[rank]
+        self.fc2_shard = torch.chunk(self.fc2.weight.data, world_size, dim=1)[rank]
         
         #raise NotImplementedError("TODO: Implement init_tensor_parallel_shards")
 
@@ -158,20 +158,23 @@ class BasicTransformerBlock(nn.Module):
         h = self.ln1(x)
 
         # Self-attention
-        q_shard = self._shape(self.q_proj_shard(h), bsz, seq_len)
-        k_shard = self._shape(self.k_proj_shard(h), bsz, seq_len)
-        v_shard = self._shape(self.v_proj_shard(h), bsz, seq_len)
-
-        q = [torch.empty_like(q_shard) for _ in range(world_size)]
-        k = [torch.empty_like(k_shard) for _ in range(world_size)]
-        v = [torch.empty_like(v_shard) for _ in range(world_size)]
+        q_shard = F.linear(h, self.q_proj_shard)
+        q = [torch.empty_like(q_shard, dtype=q_shard.dtype) for _ in range(world_size)]
         dist.all_gather(q, q_shard)
-        dist.all_gather(k, k_shard)
-        dist.all_gather(v, v_shard)
+        q = torch.cat(q, dim=-1)
+        q = self._shape(q, bsz, seq_len)
 
-        q = torch.cat(q, dim=1)
-        k = torch.cat(k, dim=1)
-        v = torch.cat(v, dim=1)
+        k_shard = F.linear(h,self.k_proj_shard)
+        k = [torch.empty_like(k_shard, dtype=k_shard.dtype) for _ in range(world_size)]
+        dist.all_gather(k, k_shard)
+        k = torch.cat(k, dim=-1)
+        k = self._shape(k, bsz, seq_len)
+
+        v_shard = F.linear(h, self.v_proj_shard)
+        v = [torch.empty_like(v_shard, dtype=v_shard.dtype) for _ in range(world_size)]
+        dist.all_gather(v, v_shard)
+        v = torch.cat(v, dim=-1)
+        v = self._shape(v, bsz, seq_len)
 
         # scaled dot-product attention
         attn_scores = torch.matmul(q, k.transpose(-2, -1)) / (self.head_dim ** 0.5)
@@ -181,19 +184,25 @@ class BasicTransformerBlock(nn.Module):
         # merge heads
         attn_output = attn_output.transpose(1, 2).contiguous()  # [B, S, n_heads, head_dim]
         attn_output = attn_output.view(bsz, seq_len, d_model)
-        attn_output = self.o_proj_shard(attn_output)
+        attn_output_shared = F.linear(attn_output, self.o_proj_shard.transpose(0,1))
         
-        dist.all_reduce(attn_output)
+        dist.all_reduce(attn_output_shared)
+        attn_output_gathered = [torch.empty_like(attn_output_shared) for _ in range(world_size)]
+        dist.all_gather(attn_output_gathered, attn_output_shared)
+        attn_output_gathered = torch.cat(attn_output_gathered, dim=-1)
 
-        x = x + self.dropout(attn_output)
+        x = x + self.dropout(attn_output_gathered)
 
         # Feed-forward
         h2 = self.ln2(x)
-        fc1_output_shard = self.fc1_shard(h2)
-        fc1_output = [torch.empty_like(fc1_output_shard) for _ in range(world_size)]
+        fc1_output_shard = F.linear(h2, self.fc1_shard, bias = self.fc1_bias_shard if self.fc1_bias_shard is not None else False)
+        fc1_output = [torch.empty_like(fc1_output_shard, dtype=fc1_output_shard.dtype) for _ in range(world_size)]
         dist.all_gather(fc1_output, fc1_output_shard)
-        fc1_output = torch.cat(fc1_output,dim=1)
-        ff = self.fc2_shard(F.relu(fc1_output))
+        fc1_output = torch.cat(fc1_output,dim=-1)
+
+        fc1_fc2_shared = torch.chunk(fc1_output, world_size, dim=-1)[rank]
+
+        ff = F.linear(F.relu(fc1_fc2_shared), self.fc2_shard)
         dist.all_reduce(ff)
         x = x + self.dropout(ff)
 
