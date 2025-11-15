@@ -255,4 +255,48 @@ class BasicTransformerBlock(nn.Module):
             Output tensor shard of shape [batch, local_seq_len, d_model].
         """
         # TODO: Implement this method using my_all_to_all from collectives.py
+        bsz, seq_len_shard, d_model = x.shape
+        h = self.ln1(x)
+        world_size = dist.get_world_size()
+        rank = dist.get_rank()
+        n_heads = self.config.n_heads
+        dim_ff = self.config.dim_ff
+        d_model = self.config.d_model
+        head_dim = d_model//n_heads
+
+        # 2. Compute Q, K, V for local shard: (batch, seq_len/N, n_heads, head_dim)
+        q_shard = self._shape(self.q_proj(h), bsz, seq_len_shard).transpose(1,2).contiguous()
+        k_shard = self._shape(self.k_proj(h), bsz, seq_len_shard).transpose(1,2).contiguous()
+        v_shard = self._shape(self.v_proj(h), bsz, seq_len_shard).transpose(1,2).contiguous()
+        # 3. All-to-all to redistribute (scatter heads, gather sequence): (batch, seq_len, n_heads/N, head_dim)
+        q = my_all_to_all(q_shard,scatter_dim=2, gather_dim=1)
+        k = my_all_to_all(k_shard,scatter_dim=2, gather_dim=1)
+        v = my_all_to_all(v_shard,scatter_dim=2, gather_dim=1)
+
+        # 4. Compute attention on full sequence for subset of heads
+        # scaled dot-product attention
+        q_attn = q.transpose(1,2).contiguous()
+        k_attn = k.transpose(1,2).contiguous()
+        v_attn = v.transpose(1,2).contiguous()
+        attn_scores = torch.matmul(q_attn, k_attn.transpose(-2, -1)) / (self.head_dim ** 0.5)
+        attn_weights = F.softmax(attn_scores, dim=-1)
+        attn_output = torch.matmul(attn_weights, v_attn).transpose(1,2).contiguous()  # [B, n_heads/N, S， head_dim] -》 [B, S, n_heads/N, head_dim]
+
+        # 5. All-to-all reverse (scatter sequence, gather heads):(batch, seq_len/N, n_heads, head_dim)
+        attn_output_redst = my_all_to_all(attn_output, scatter_dim=1, gather_dim=2)
+
+        # merge heads
+        attn_output_merged = attn_output_redst.view(bsz, seq_len_shard, d_model)
+
+        # 6. Output projection and FFN on local sequence shard
+        attn_output_proj = self.o_proj(attn_output_merged)
+        x = x + self.dropout(attn_output_proj)
+
+        # Feed-forward
+        h2 = self.ln2(x)
+        ff = self.fc2(F.relu(self.fc1(h2)))
+        x = x + self.dropout(ff)
+        # 7. Return local shard
+        return x
+
         raise NotImplementedError("TODO: Implement forward_ulysses")
