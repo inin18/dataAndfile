@@ -184,14 +184,14 @@ class BasicTransformerBlock(nn.Module):
         # merge heads
         attn_output = attn_output.transpose(1, 2).contiguous()  # [B, S, n_heads, head_dim]
         attn_output = attn_output.view(bsz, seq_len, d_model)
-        attn_output_shared = F.linear(attn_output, self.o_proj_shard.transpose(0,1))
+        attn_output_shard = F.linear(attn_output, self.o_proj_shard)
         
-        dist.all_reduce(attn_output_shared)
-        attn_output_gathered = torch.empty_like(x)
-        attn_output_gathered_list = list(torch.chunk(attn_output_gathered, world_size, dim=-1))
-        dist.all_gather(attn_output_gathered_list, attn_output_shared)
+        dist.all_reduce(attn_output_shard)
+#        attn_output_gathered = torch.empty_like(x)
+#        attn_output_gathered_list = list(torch.chunk(attn_output_gathered, world_size, dim=-1))
+#        dist.all_gather(attn_output_gathered_list, attn_output_shared)
 
-        x = x + self.dropout(attn_output_gathered)
+        x = x + self.dropout(attn_output_shard) #gathered)
 
         # Feed-forward
         h2 = self.ln2(x)
