@@ -187,9 +187,9 @@ class BasicTransformerBlock(nn.Module):
         attn_output_shared = F.linear(attn_output, self.o_proj_shard.transpose(0,1))
         
         dist.all_reduce(attn_output_shared)
-        attn_output_gathered = [torch.empty_like(attn_output_shared) for _ in range(world_size)]
-        dist.all_gather(attn_output_gathered, attn_output_shared)
-        attn_output_gathered = torch.cat(attn_output_gathered, dim=-1)
+        attn_output_gathered = torch.empty_like(x)
+        attn_output_gathered_list = list(torch.chunk(attn_output_gathered, world_size, dim=-1))
+        dist.all_gather(attn_output_gathered_list, attn_output_shared)
 
         x = x + self.dropout(attn_output_gathered)
 
@@ -200,9 +200,10 @@ class BasicTransformerBlock(nn.Module):
         dist.all_gather(fc1_output, fc1_output_shard)
         fc1_output = torch.cat(fc1_output,dim=-1)
 
-        fc1_fc2_shared = torch.chunk(fc1_output, world_size, dim=-1)[rank]
+        fc1_fc2_shard = torch.chunk(fc1_output, world_size, dim=-1)[rank]
 
-        ff = F.linear(F.relu(fc1_fc2_shared), self.fc2_shard)
+        ff = F.linear(F.relu(fc1_fc2_shard), self.fc2_shard)
+#        ff = torch.matmul(F.relu(fc1_fc2_shard), self.fc2_shard.transpose(0,1))
         dist.all_reduce(ff)
         x = x + self.dropout(ff)
 
