@@ -108,7 +108,6 @@ class ParallelGroupNorm(nn.Module):
         self.rank = dist.get_rank(self.process_group)
 
         # raise NotImplementedError("Implement ParallelGroupNorm")
-
     def forward(self, x: Tensor) -> Tensor:
         B, C, H, W = x.size()
         x_shard = torch.chunk(x, self.world_size, dim=-1)[self.rank]
