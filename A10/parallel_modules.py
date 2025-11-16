@@ -106,20 +106,53 @@ class ParallelGroupNorm(nn.Module):
         self.norm = nn.GroupNorm(num_groups, num_channels, eps, affine)
         self.world_size = dist.get_world_size(self.process_group)
         self.rank = dist.get_rank(self.process_group)
+        self.eps = eps
+        self.affine = affine
+        self.num_groups = num_groups
+        self.num_channels = num_channels
+        self._has_broadcast = False
+        self.weight=self.norm.weight
+        self.bias=self.norm.bias
 
         # raise NotImplementedError("Implement ParallelGroupNorm")
     def forward(self, x: Tensor) -> Tensor:
+        '''
+        if self.norm.affine and not self._has_broadcast:
+            if self.norm.weight is not None:
+                dist.broadcast(self.norm.weight, src=0, group=self.process_group)
+            if self.norm.bias is not None:
+                dist.broadcast(self.norm.bias, src=0, group=self.process_group)
+            self._has_broadcast = True
+            '''
         B, C, H, W = x.size()
-        x_shard = torch.chunk(x, self.world_size, dim=-1)[self.rank]
-        out_shard = self.norm(x_shard)
-        out = [torch.empty_like(out_shard) for _ in range(self.world_size)]
-        dist.all_gather(out, out_shard, self.process_group)
-        out = torch.cat(out, dim=-1)
+        G = self.num_groups
+        x_shard = x.to(torch.float64)
+        x_grouped = x_shard.view(B,G,C//G, H, x_shard.size(-1))
+        local_sum = x_grouped.sum(dim=(2,3,4))
+        local_sumsq = (x_grouped**2).sum(dim=(2,3,4))
+        cnt = C//G * H * x_grouped.size(-1)
+
+        dist.all_reduce(local_sum, group=self.process_group)
+        dist.all_reduce(local_sumsq, group=self.process_group)
+        cnt = cnt *self.world_size
+        cnt_tensor = torch.tensor(cnt, dtype=torch.float64,device=x.device).view(1,1).expand(B, G)
+
+        mean = (local_sum/cnt_tensor).view(B, G, 1, 1, 1)
+        var = (local_sumsq/cnt_tensor-mean.squeeze()**2).view(B, G, 1, 1, 1)
+        var = torch.clamp(var, min=0.0)
+        eps = torch.tensor(self.eps, dtype=torch.float64,device=x.device).view(1,1).expand(B, G).view(B,G,1,1,1)
+        invstd = 1.0/torch.sqrt(var+eps)
+
+        x_norm = (x_grouped-mean)*invstd
+        x_norm = x_norm.view(B, C, H, x_shard.size(-1))
+
+        if self.norm.affine:
+            w = self.norm.weight.view(1, C, 1, 1).to(device=x_shard.device, dtype=self.norm.weight.dtype)
+            b = self.norm.bias.view(1, C, 1, 1).to(device=x_shard.device, dtype=self.norm.weight.dtype)
+            x_norm = x_norm * w + b
+        out = x_norm.to(x.dtype)
         return out
         raise NotImplementedError("Implement ParallelGroupNorm.forward")
-    
-    
-
 
 class ParallelAttnBlock(nn.Module):
     
