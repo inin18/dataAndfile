@@ -28,10 +28,61 @@ class ParallelConv2d(nn.Module):
         # Assume dist is initialized
         self.rank = dist.get_rank(self.process_group)
         self.world_size = dist.get_world_size(self.process_group)
-        
-        raise NotImplementedError("Implement ParallelConv2d")
+
+        self.conv = nn.Conv2d(
+            in_channels = in_channels,
+            out_channels = out_channels,
+            kernel_size = kernel_size,
+            stride = stride,
+            padding = padding,
+        )
+        self.kernel_size = kernel_size
+        self.stride = stride
+        self.padding = padding
+        # raise NotImplementedError("Implement ParallelConv2d")
     
     def forward(self, x: Tensor) -> Tensor:
+        """
+        Extends `nn.Conv2d` to work with sequence-parallel inputs
+        Inputs are split along the width dimension (W), so each process gets (B, C, H, W_local)
+        Handle input/output tensor shapes correctly when width dimension is split
+        Communication at boundaries**: Since convolutions require neighboring pixels, you need to communicate boundary regions between devices to ensure correct convolution results at the edges of each device's width chunk
+        """
+        x_shard = torch.chunk(x, self.world_size, dim=-1)[self.rank]
+        B, C, H, W_local = x_shard.size()
+
+        halo = self.kernel_size // 2
+        right = torch.zeros(B, C, H, halo, device=x_shard.device)
+        left = torch.zeros(B, C, H, halo, device=x_shard.device)
+
+        req = []
+
+        if self.rank < self.world_size - 1:
+            req.append(dist.irecv(right, src = self.rank+1, group=self.process_group))
+        if self.rank > 0:
+            req.append(dist.irecv(left, src=self.rank - 1, group=self.process_group))
+            
+        if self.rank < self.world_size - 1:
+            req.append(dist.isend(x_shard[:, :, :, -halo:].contiguous(), dst=self.rank + 1, group=self.process_group))
+        if self.rank > 0:
+            req.append(dist.isend(x_shard[:, :, :, :halo].contiguous(), dst=self.rank - 1, group=self.process_group))
+
+        for r in req:
+            r.wait()
+
+        x_shard = torch.cat([left, x_shard, right], dim=-1)
+        
+        out_shard = self.conv(x_shard)
+
+        left_crop = halo//self.stride if self.rank > 0 else 0
+        right_crop = halo//self.stride if self.rank < self.world_size - 1 else out_shard.size(-1)
+        out_shard = out_shard[..., left_crop:-right_crop]
+        
+        out_gathered = [torch.empty_like(out_shard, device=x.device) for _ in range(self.world_size)]
+        dist.all_gather(out_gathered, out_shard, group=self.process_group)
+        out = torch.cat(out_gathered, dim=-1)
+
+        return out
         raise NotImplementedError("Implement ParallelConv2d.forward")
 
 
