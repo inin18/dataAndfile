@@ -71,22 +71,23 @@ class ParallelConv2d(nn.Module):
             r.wait()
 
         x_shard = torch.cat([left, x_shard, right], dim=-1)
+        if self.rank==0 and self.padding>0:
+            x_shard = torch.nn.functional.pad(x_shard, (self.padding, 0))
+        if self.rank==self.world_size-1 and self.padding>0:
+            x_shard = torch.nn.functional.pad(x_shard, (0, self.padding))
+        x_shard = torch.nn.functional.pad(x_shard, (0, 0,self.padding, self.padding))
         
         out_shard = self.conv(x_shard)
         w_out = out_shard.size(-1)
 
-        left_crop = int(math.ceil((halo+(self.padding if self.rank>0 else 0))/self.stride) if self.rank > 0 else 0)
-        if self.rank<self.world_size-1:
-            right_crop = w_out-int(math.ceil((halo+self.padding)/self.stride))
-        else:
-            right_crop = w_out
-        print(left_crop, right_crop,out_shard.size())
+        import math
+        left_crop = int(math.ceil((halo if self.rank>0 else self.padding)/self.stride))
+        right_crop = w_out-int(math.ceil((halo if self.rank<self.world_size-1 else self.padding)/self.stride))
         out_shard = out_shard[..., left_crop:right_crop]
         
         out_gathered = [torch.empty_like(out_shard, device=x.device) for _ in range(self.world_size)]
         dist.all_gather(out_gathered, out_shard, group=self.process_group)
         out = torch.cat(out_gathered, dim=-1)
-
         return out
         raise NotImplementedError("Implement ParallelConv2d.forward")
 
