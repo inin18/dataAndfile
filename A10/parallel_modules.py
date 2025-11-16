@@ -34,7 +34,7 @@ class ParallelConv2d(nn.Module):
             out_channels = out_channels,
             kernel_size = kernel_size,
             stride = stride,
-            padding = padding,
+            padding = 0 
         )
         self.kernel_size = kernel_size
         self.stride = stride
@@ -73,10 +73,15 @@ class ParallelConv2d(nn.Module):
         x_shard = torch.cat([left, x_shard, right], dim=-1)
         
         out_shard = self.conv(x_shard)
+        w_out = out_shard.size(-1)
 
-        left_crop = halo//self.stride if self.rank > 0 else 0
-        right_crop = halo//self.stride if self.rank < self.world_size - 1 else out_shard.size(-1)
-        out_shard = out_shard[..., left_crop:-right_crop]
+        left_crop = int(math.ceil((halo+(self.padding if self.rank>0 else 0))/self.stride) if self.rank > 0 else 0)
+        if self.rank<self.world_size-1:
+            right_crop = w_out-int(math.ceil((halo+self.padding)/self.stride))
+        else:
+            right_crop = w_out
+        print(left_crop, right_crop,out_shard.size())
+        out_shard = out_shard[..., left_crop:right_crop]
         
         out_gathered = [torch.empty_like(out_shard, device=x.device) for _ in range(self.world_size)]
         dist.all_gather(out_gathered, out_shard, group=self.process_group)
