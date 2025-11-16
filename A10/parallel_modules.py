@@ -104,10 +104,20 @@ class ParallelGroupNorm(nn.Module):
     ):
         super().__init__()
         self.process_group = process_group or dist.group.WORLD
-        
-        raise NotImplementedError("Implement ParallelGroupNorm")
+        self.norm = nn.GroupNorm(num_groups, num_channels, eps, affine)
+        self.world_size = dist.get_world_size(self.process_group)
+        self.rank = dist.get_rank(self.process_group)
+
+        # raise NotImplementedError("Implement ParallelGroupNorm")
     
     def forward(self, x: Tensor) -> Tensor:
+        B, C, H, W = x.size()
+        x_shard = torch.chunk(x, self.world_size, dim=-1)[self.rank]
+        out_shard = self.norm(x_shard)
+        out = [torch.empty_like(out_shard) for _ in range(self.world_size)]
+        dist.all_gather(out, out_shard, self.process_group)
+        out = torch.cat(out, dim=-1)
+        return out
         raise NotImplementedError("Implement ParallelGroupNorm.forward")
 
 
