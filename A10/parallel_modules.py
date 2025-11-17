@@ -39,6 +39,8 @@ class ParallelConv2d(nn.Module):
         self.kernel_size = kernel_size
         self.stride = stride
         self.padding = padding
+        self.weight = self.conv.weight
+        self.bias = self.conv.bias
         # raise NotImplementedError("Implement ParallelConv2d")
     
     def forward(self, x: Tensor) -> Tensor:
@@ -52,7 +54,7 @@ class ParallelConv2d(nn.Module):
         B, C, H, W_local = x_shard.size()
 
         halo = self.kernel_size // 2
-        if halo == 0:
+        if halo == 0 or self.world_size==1:
             right = torch.tensor(0) 
             left = torch.tensor(0)
         else:
@@ -86,7 +88,7 @@ class ParallelConv2d(nn.Module):
                 r.wait()
             if self.rank==0:
                 x_shard = torch.cat([x_shard, right], dim=-1)
-            elif self.rank==self.world_size-1:
+            elif self.rank==self.world_size-1: 
                 x_shard = torch.cat([left, x_shard], dim=-1)
             else:
                 x_shard = torch.cat([left, x_shard, right], dim=-1)
@@ -96,6 +98,7 @@ class ParallelConv2d(nn.Module):
         if self.rank==self.world_size-1 and self.padding>0:
             x_shard = torch.nn.functional.pad(x_shard, (0, self.padding))
         x_shard = torch.nn.functional.pad(x_shard, (0, 0,self.padding, self.padding))
+
         
         out_shard = self.conv(x_shard)
         
@@ -194,10 +197,20 @@ class ParallelUpsample(nn.Module):
     ):
         super().__init__()
         self.process_group = process_group or dist.group.WORLD
-        
-        raise NotImplementedError("Implement ParallelUpsample")
+
+        self.conv = ParallelConv2d(in_channels, in_channels, kernel_size=3, stride=1, padding=1, process_group=process_group)
+        self.rank = dist.get_rank(process_group)
+        self.world_size = dist.get_world_size(process_group)
+        self.weight = self.conv.weight
+        self.bias = self.conv.bias
+        #raise NotImplementedError("Implement ParallelUpsample")
     
     def forward(self, x: Tensor) -> Tensor:
+        # - Handle upsampling in sequence-parallel context
+        # - Ensure the upsampled output maintains correct sequence parallelism
+
+        x = nn.functional.interpolate(x, scale_factor=2.0, mode="nearest")
+        return self.conv(x)
         raise NotImplementedError("Implement ParallelUpsample.forward")
 
 
