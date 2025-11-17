@@ -34,7 +34,7 @@ class ParallelConv2d(nn.Module):
             out_channels = out_channels,
             kernel_size = kernel_size,
             stride = stride,
-            padding = 0 
+            padding = 0
         )
         self.kernel_size = kernel_size
         self.stride = stride
@@ -48,29 +48,49 @@ class ParallelConv2d(nn.Module):
         Handle input/output tensor shapes correctly when width dimension is split
         Communication at boundaries**: Since convolutions require neighboring pixels, you need to communicate boundary regions between devices to ensure correct convolution results at the edges of each device's width chunk
         """
-        x_shard = torch.chunk(x, self.world_size, dim=-1)[self.rank]
+        x_shard = x #torch.chunk(x, self.world_size, dim=-1)[self.rank]
         B, C, H, W_local = x_shard.size()
 
         halo = self.kernel_size // 2
-        right = torch.zeros(B, C, H, halo, device=x_shard.device)
-        left = torch.zeros(B, C, H, halo, device=x_shard.device)
+        if halo == 0:
+            right = torch.tensor(0) 
+            left = torch.tensor(0)
+        else:
+            right = torch.zeros(B, C, H, halo, device=x_shard.device)
+            left = torch.zeros(B, C, H, halo, device=x_shard.device)
 
-        req = []
-
-        if self.rank < self.world_size - 1:
-            req.append(dist.irecv(right, src = self.rank+1, group=self.process_group))
-        if self.rank > 0:
-            req.append(dist.irecv(left, src=self.rank - 1, group=self.process_group))
+            req = []
+            if self.rank%2==0:
+                if self.rank < self.world_size - 1:
+                    req.append(dist.irecv(right, src = self.rank+1, group=self.process_group))
+                if self.rank > 0:
+                    req.append(dist.irecv(left, src=self.rank - 1, group=self.process_group))
             
-        if self.rank < self.world_size - 1:
-            req.append(dist.isend(x_shard[:, :, :, -halo:].contiguous(), dst=self.rank + 1, group=self.process_group))
-        if self.rank > 0:
-            req.append(dist.isend(x_shard[:, :, :, :halo].contiguous(), dst=self.rank - 1, group=self.process_group))
+                if self.rank < self.world_size - 1:
+                    req.append(dist.isend(x_shard[:, :, :, -halo:].contiguous(), dst=self.rank + 1, group=self.process_group))
+                if self.rank > 0:
+                    req.append(dist.isend(x_shard[:, :, :, :halo].contiguous(), dst=self.rank - 1, group=self.process_group))
+            else:
+                if self.rank < self.world_size - 1:
+                    req.append(dist.isend(x_shard[:, :, :, -halo:].contiguous(), dst=self.rank + 1, group=self.process_group))
+                if self.rank > 0:
+                    req.append(dist.isend(x_shard[:, :, :, :halo].contiguous(), dst=self.rank - 1, group=self.process_group))
 
-        for r in req:
-            r.wait()
+                if self.rank < self.world_size - 1:
+                    req.append(dist.irecv(right, src = self.rank+1, group=self.process_group))
+                if self.rank > 0:
+                    req.append(dist.irecv(left, src=self.rank - 1, group=self.process_group))
+            
 
-        x_shard = torch.cat([left, x_shard, right], dim=-1)
+            for i,r in enumerate(req):
+                r.wait()
+            if self.rank==0:
+                x_shard = torch.cat([x_shard, right], dim=-1)
+            elif self.rank==self.world_size-1:
+                x_shard = torch.cat([left, x_shard], dim=-1)
+            else:
+                x_shard = torch.cat([left, x_shard, right], dim=-1)
+
         if self.rank==0 and self.padding>0:
             x_shard = torch.nn.functional.pad(x_shard, (self.padding, 0))
         if self.rank==self.world_size-1 and self.padding>0:
@@ -78,17 +98,8 @@ class ParallelConv2d(nn.Module):
         x_shard = torch.nn.functional.pad(x_shard, (0, 0,self.padding, self.padding))
         
         out_shard = self.conv(x_shard)
-        w_out = out_shard.size(-1)
-
-        import math
-        left_crop = int(math.ceil((halo if self.rank>0 else self.padding)/self.stride))
-        right_crop = w_out-int(math.ceil((halo if self.rank<self.world_size-1 else self.padding)/self.stride))
-        out_shard = out_shard[..., left_crop:right_crop]
         
-        out_gathered = [torch.empty_like(out_shard, device=x.device) for _ in range(self.world_size)]
-        dist.all_gather(out_gathered, out_shard, group=self.process_group)
-        out = torch.cat(out_gathered, dim=-1)
-        return out
+        return out_shard
         raise NotImplementedError("Implement ParallelConv2d.forward")
 
 
@@ -132,8 +143,8 @@ class ParallelGroupNorm(nn.Module):
         local_sumsq = (x_grouped**2).sum(dim=(2,3,4))
         cnt = C//G * H * x_grouped.size(-1)
 
-        dist.all_reduce(local_sum, group=self.process_group)
-        dist.all_reduce(local_sumsq, group=self.process_group)
+        dist.all_reduce(local_sum, op=dist.ReduceOp.SUM, group=self.process_group)
+        dist.all_reduce(local_sumsq, op=dist.ReduceOp.SUM,group=self.process_group)
         cnt = cnt *self.world_size
         cnt_tensor = torch.tensor(cnt, dtype=torch.float64,device=x.device).view(1,1).expand(B, G)
 
