@@ -8,6 +8,7 @@ from torch.nn.functional import silu as swish
 
 from autoencoder_2d import (
     AutoEncoderConfig,
+    AttnBlock,
     DiagonalGaussianDistribution
 )
 
@@ -180,11 +181,13 @@ class ParallelAttnBlock(nn.Module):
         self.in_channels = in_channels
 
         #implement parallel attention by Ring Attention
-        self.norm = ParallelGroupNorm(num_groups=32, num_channels=in_channels, eps=1e-6, affine=True)
-        self.q = ParallelConv2d(in_channels, in_channels, kernel_size=1)
-        self.k = ParallelConv2d(in_channels, in_channels, kernel_size=1)
-        self.v = ParallelConv2d(in_channels, in_channels, kernel_size=1)
-        self.proj_out = ParallelConv2d(in_channels, in_channels, kernel_size=1)
+        self.world_size = dist.get_world_size()
+        self.rank = dist.get_rank()
+        self.norm = ParallelGroupNorm(num_groups=32, num_channels=in_channels, eps=1e-6, affine=True, process_group=self.process_group)
+        self.q = ParallelConv2d(in_channels, in_channels, kernel_size=1,process_group=self.process_group) 
+        self.k = ParallelConv2d(in_channels, in_channels, kernel_size=1,process_group=self.process_group)
+        self.v = ParallelConv2d(in_channels, in_channels, kernel_size=1,process_group=self.process_group)
+        self.proj_out = ParallelConv2d(in_channels, in_channels, kernel_size=1,process_group=self.process_group)
         
         #raise NotImplementedError("Implement ParallelAttnBlock")
     
@@ -193,19 +196,47 @@ class ParallelAttnBlock(nn.Module):
         q = self.q(h_)
         k = self.k(h_)
         v = self.v(h_)
+
         b, c, h, w = q.shape
+
         q = rearrange(q, "b c h w -> b 1 (h w) c").contiguous()
         k = rearrange(k, "b c h w -> b 1 (h w) c").contiguous()
         v = rearrange(v, "b c h w -> b 1 (h w) c").contiguous()
-        h_ = nn.functional.scaled_dot_product_attention(q, k, v)
+        out = nn.functional.scaled_dot_product_attention(q, k, v)
+        if self.world_size == 1:
+            return rearrange(out, "b 1 (h w) c -> b c h w", h=h, w=w)
+        k_tmp = k.clone()
+        v_tmp = v.clone()
+        out_accum = torch.zeros_like(q)
 
-        return rearrange(h_, "b 1 (h w) c -> b c h w", h=h, w=w)
+        v_buff = torch.empty_like(v_tmp)
+        k_buff = torch.empty_like(k_tmp)
+
+        for i in range(1,self.world_size):
+            print(f'q:{q.size()}, k:{k.size()}, v:{v.size()}')
+            print(f'q:{q.size()}, k_tmp:{k_tmp.size()}, v_tmp:{v_tmp.size()}')
+            out_accum += nn.functional.scaled_dot_product_attention(q, k_tmp, v_tmp)
+            send_r = (self.rank+i) % self.world_size
+            recv_r = (self.rank-i+self.world_size)%self.world_size
+            req = []
+            req.append(dist.isend(k_tmp, dst=send_r, group=self.process_group))
+            req.append(dist.isend(v_tmp, dst=send_r, group=self.process_group))
+            req.append(dist.irecv(k_buff, src=recv_r, group=self.process_group))
+            req.append(dist.irecv(v_buff, src=recv_r, group=self.process_group))
+
+            for r in req:
+                r.wait()
+            k_tmp = k_buff
+            v_tmp = v_buff
+
+        print(f'bchw:{b, c, h, w}')
+        return rearrange(out_accum/self.world_size, "b 1 (h w) c -> b c h w", h=h, w=w)
 
         raise NotImplementedError("Implement ParallelAttnBlock.attention")
     
     def forward(self, x: Tensor) -> Tensor:
-
-        return
+        print(f'x:{x.size()}')
+        return x + self.proj_out(self.attention(x))
 
         raise NotImplementedError("Implement ParallelAttnBlock.forward")
 
@@ -310,7 +341,7 @@ class ParallelDecoder(nn.Module):
         # middle
         self.mid = nn.Module()
         self.mid.block_1 = ParallelResnetBlock(in_channels=block_in, out_channels=block_in, process_group=self.process_group)
-        self.mid.attn_1 = AttnBlock(block_in) # not implemented yet: ParallelAttnBlock
+        self.mid.attn_1 = ParallelAttnBlock(block_in) 
         self.mid.block_2 = ParallelResnetBlock(in_channels=block_in, out_channels=block_in, process_group=self.process_group)
 
         # upsampling
@@ -320,7 +351,7 @@ class ParallelDecoder(nn.Module):
             attn = nn.ModuleList()
             block_out = config.ch * config.ch_mult[i_level]
             for _ in range(self.num_res_blocks + 1):
-                block.append(ParallelResnetBlock(in_channels=block_in, out_channels=block_outi, process_group=self.process_group))
+                block.append(ParallelResnetBlock(in_channels=block_in, out_channels=block_out, process_group=self.process_group))
                 block_in = block_out
             up = nn.Module()
             up.block = block
@@ -421,3 +452,8 @@ class ParallelAutoEncoder(nn.Module):
     def get_last_layer(self):
         return self.decoder.conv_out.weight
 
+
+    def load_checkpoint(self, checkpoint_path: str):
+        from safetensors.torch import load_file
+        state_dict = load_file(checkpoint_path)
+        self.load_state_dict(state_dict)
