@@ -1,0 +1,79 @@
+[Gloo] Rank 0 is connected to 3 peer ranks. Expected number of connected peer ranks is : 3
+[Gloo] Rank 2 is connected to 3 peer ranks. Expected number of connected peer ranks is : 3
+======================================================================
+Starting Distributed Test Suite
+World size: 4
+======================================================================
+
+======================================================================
+Running test_parallel_conv2d
+======================================================================
+
+[Gloo] Rank 1 is connected to 3 peer ranks. Expected number of connected peer ranks is : 3
+[Gloo] Rank 3 is connected to 3 peer ranks. Expected number of connected peer ranks is : 3
+============================================================
+Running ParallelConv2d tests
+============================================================
+✓ ParallelConv2d test passed: in=32, out=64, kernel=3, stride=1, padding=1
+✓ ParallelConv2d test passed: in=64, out=64, kernel=1, stride=1, padding=0
+✓ ParallelConv2d test passed: in=128, out=256, kernel=3, stride=1, padding=1
+============================================================
+All ParallelConv2d tests passed!
+============================================================
+
+✓ test_parallel_conv2d completed successfully
+
+
+======================================================================
+Running test_parallel_groupnorm
+======================================================================
+
+============================================================
+Running ParallelGroupNorm tests
+============================================================
+✓ ParallelGroupNorm test passed: groups=32, channels=128
+✓ ParallelGroupNorm test passed: groups=16, channels=256
+✓ ParallelGroupNorm test passed: groups=8, channels=512
+============================================================
+All ParallelGroupNorm tests passed!
+============================================================
+
+✓ test_parallel_groupnorm completed successfully
+
+
+======================================================================
+Running test_parallel_upsample
+======================================================================
+
+============================================================
+Running ParallelUpsample tests
+============================================================
+✓ ParallelUpsample test passed: in_channels=64
+✓ ParallelUpsample test passed: in_channels=128
+✓ ParallelUpsample test passed: in_channels=256
+============================================================
+All ParallelUpsample tests passed!
+============================================================
+
+✓ test_parallel_upsample completed successfully
+
+
+======================================================================
+Running test_parallel_attn_block
+======================================================================
+
+============================================================
+Running ParallelAttnBlock tests
+============================================================
+✓ ParallelAttnBlock test passed: in_channels=64
+✓ ParallelAttnBlock test passed: in_channels=128
+✓ ParallelAttnBlock test passed: in_channels=256
+============================================================
+All ParallelAttnBlock tests passed!
+============================================================
+
+✓ test_parallel_attn_block completed successfully
+
+======================================================================
+All tests completed successfully!
+======================================================================
