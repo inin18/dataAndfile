@@ -216,13 +216,13 @@ class ParallelAttnBlock(nn.Module):
 
         v_buff = torch.empty_like(v_tmp)
         k_buff = torch.empty_like(k_tmp)
+        send_r = (self.rank+1) % self.world_size
+        recv_r = (self.rank-1+self.world_size)%self.world_size
 
         for i in range(1,self.world_size):
             #print(f'q:{q.size()}, k:{k.size()}, v:{v.size()}')
             #print(f'q:{q.size()}, k_tmp:{k_tmp.size()}, v_tmp:{v_tmp.size()}')
             #out_accum += nn.functional.scaled_dot_product_attention(q, k_tmp, v_tmp)
-            send_r = (self.rank+i) % self.world_size
-            recv_r = (self.rank-i+self.world_size)%self.world_size
             req = []
             req.append(dist.isend(k_tmp, dst=send_r, group=self.process_group))
             req.append(dist.isend(v_tmp, dst=send_r, group=self.process_group))
@@ -231,9 +231,9 @@ class ParallelAttnBlock(nn.Module):
 
             for r in req:
                 r.wait()
-            k_tmp = k_buff.clone()
-            v_tmp = v_buff.clone()
             v_list.append(v_buff.clone())
+            k_tmp, k_buff = k_buff, k_tmp
+            v_tmp, v_buff = v_buff, v_tmp
 
             logits_list.append(torch.matmul(q, k_tmp.transpose(-2,-1))/math.sqrt(d_k)) 
         logits_accum = torch.cat(logits_list, dim=-1)
@@ -469,4 +469,27 @@ class ParallelAutoEncoder(nn.Module):
     def load_checkpoint(self, checkpoint_path: str):
         from safetensors.torch import load_file
         state_dict = load_file(checkpoint_path)
-        self.load_state_dict(state_dict)
+        new_state_dict = {}
+        #mapped = {}
+        for k, v in state_dict.items():
+            parts = k.rsplit('.', 1)
+            if len(parts) != 2:
+                new_state_dict[k] = v
+                continue
+            module_path, param_name = parts
+            new_key = k
+
+            if k.startswith('decoder') and param_name in ['weight', 'bias']:
+                if any(name in module_path for name in ['conv', 'q', 'k', 'v', 'proj_out', 'nin_shortcut']):
+                    new_key = f'{module_path}.conv.{param_name}'
+        #            mapped[k]=new_key
+                elif any(name in module_path for name in ['norm', 'norm1', 'norm2', 'norm_out']):
+                    new_key = f'{module_path}.norm.{param_name}'
+        #            mapped[k]=new_key
+            new_state_dict[new_key] = v.contiguous()
+
+        #for k,v in mapped.items():
+        #    print(f'{k}->{v}')
+        print("Mapped state_dict keys. Attempting to load...")
+
+        self.load_state_dict(new_state_dict, strict = False)
