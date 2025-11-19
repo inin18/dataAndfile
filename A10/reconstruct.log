@@ -1,0 +1,50 @@
+[Gloo] Rank [Gloo] Rank 1 is connected to 03 is connected to  peer ranks. 3Expected number of connected peer ranks is :  peer ranks. 3Expected number of connected peer ranks is : [Gloo] Rank 
+33[Gloo] Rank 
+ is connected to 23 is connected to  peer ranks. 3Expected number of connected peer ranks is :  peer ranks. 3Expected number of connected peer ranks is : 
+3
+Using device: cpuUsing device: cpuUsing device: cpuUsing device: cpu
+
+
+
+Running in distributed mode: rank 1/4Running in distributed mode: rank 2/4Running in distributed mode: rank 0/4Running in distributed mode: rank 3/4
+
+
+
+
+============================================================
+============================================================
+============================================================
+============================================================
+
+
+
+Action: Decode with Parallel AutoEncoder (rank 2/4)Action: Decode with Parallel AutoEncoder (rank 1/4)Action: Decode with Parallel AutoEncoder (rank 3/4)Action: Decode with Parallel AutoEncoder (rank 0/4)
+
+
+
+================================================================================================================================================================================================================================================
+
+
+
+Loading checkpoint from: misc/ae.safetensors
+Mapped state_dict keys. Attempting to load...
+Checkpoint loaded successfully!
+Latent code loaded from: latent_code.pt
+Latent code shape: torch.Size([1, 16, 1, 128, 128])
+Latent code shape: torch.Size([1, 16, 1, 128, 128])
+Latent code loaded from: latent_code.pt
+Latent code shape: torch.Size([1, 16, 1, 128, 128])
+Latent code loaded from: latent_code.pt
+Latent code shape: torch.Size([1, 16, 1, 128, 128])
+Latent code loaded from: latent_code.pt
+Latent code shape: torch.Size([1, 16, 1, 128, 128])
+[Rank 1] Decoding image...
+[Rank 0] Decoding image...
+[Rank 2] Decoding image...
+[Rank 3] Decoding image...
+Reconstructed image shape: torch.Size([1, 3, 1, 1024, 1024])
+Reconstructed image saved to: reconstructed_parallel.jpg
+
+============================================================
+Parallel decoding completed!
+============================================================
