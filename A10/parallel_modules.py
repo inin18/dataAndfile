@@ -5,6 +5,7 @@ import torch.distributed as dist
 from einops import rearrange
 from torch import Tensor, nn
 from torch.nn.functional import silu as swish
+import math
 
 from autoencoder_2d import (
     AutoEncoderConfig,
@@ -207,15 +208,19 @@ class ParallelAttnBlock(nn.Module):
             return rearrange(out, "b 1 (h w) c -> b c h w", h=h, w=w)
         k_tmp = k.clone()
         v_tmp = v.clone()
-        out_accum = torch.zeros_like(q)
+        
+        #out_accum = torch.zeros_like(q)
+        d_k = q.size(-1)
+        logits_list = [torch.matmul(q, k.transpose(-2,-1))/math.sqrt(d_k)]
+        v_list = [v.clone()]
 
         v_buff = torch.empty_like(v_tmp)
         k_buff = torch.empty_like(k_tmp)
 
         for i in range(1,self.world_size):
-            print(f'q:{q.size()}, k:{k.size()}, v:{v.size()}')
-            print(f'q:{q.size()}, k_tmp:{k_tmp.size()}, v_tmp:{v_tmp.size()}')
-            out_accum += nn.functional.scaled_dot_product_attention(q, k_tmp, v_tmp)
+            #print(f'q:{q.size()}, k:{k.size()}, v:{v.size()}')
+            #print(f'q:{q.size()}, k_tmp:{k_tmp.size()}, v_tmp:{v_tmp.size()}')
+            #out_accum += nn.functional.scaled_dot_product_attention(q, k_tmp, v_tmp)
             send_r = (self.rank+i) % self.world_size
             recv_r = (self.rank-i+self.world_size)%self.world_size
             req = []
@@ -226,16 +231,24 @@ class ParallelAttnBlock(nn.Module):
 
             for r in req:
                 r.wait()
-            k_tmp = k_buff
-            v_tmp = v_buff
+            k_tmp = k_buff.clone()
+            v_tmp = v_buff.clone()
+            v_list.append(v_buff.clone())
 
-        print(f'bchw:{b, c, h, w}')
-        return rearrange(out_accum/self.world_size, "b 1 (h w) c -> b c h w", h=h, w=w)
+            logits_list.append(torch.matmul(q, k_tmp.transpose(-2,-1))/math.sqrt(d_k)) 
+        logits_accum = torch.cat(logits_list, dim=-1)
+        attn_weights = torch.softmax(logits_accum, dim=-1)
+        cated_v = torch.cat(v_list, dim=-2)
+        #print(f'logits_list:{len(logits_list)} {logits_list[0].size()}, logits_accum:{logits_accum.size()}, att_weight:{attn_weights.size()}, cated_v:{cated_v.size()} ')#out_accum:{out_accum.size()}')
+        out_accum = torch.matmul(attn_weights, cated_v)
+
+        #print(f'b c h w:{b, c, h, w} out_accum:{out_accum.size()} b 1(h w) c->b c h w')
+        return rearrange(out_accum, "b 1 (h w) c -> b c h w", h=h, w=w)
 
         raise NotImplementedError("Implement ParallelAttnBlock.attention")
     
     def forward(self, x: Tensor) -> Tensor:
-        print(f'x:{x.size()}')
+        #print(f'x:{x.size()}')
         return x + self.proj_out(self.attention(x))
 
         raise NotImplementedError("Implement ParallelAttnBlock.forward")
